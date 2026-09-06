@@ -1,0 +1,19 @@
+# build outputs
+/target/
+/node_modules/
+/dist/
+
+# local artifacts and evidence payloads (only digests belong in Git)
+/artifacts/
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# secrets never enter Git
+*.key
+*.pem
+.env
+.env.*
