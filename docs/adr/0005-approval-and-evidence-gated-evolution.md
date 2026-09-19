@@ -1,11 +1,12 @@
 # ADR-0005 · Approval 一级对象与证据门控演进
 
-- 状态：accepted
+- 状态：accepted（v0.7.0 修订）
 - 日期：2026-09-07
 - 决策者：owner
 - 背景来源：[前沿对照审查报告](../research/20260907-frontier-review-and-recommendations.md) §2.5、§3.1、§3.4、§3.6、§5.4、§6.1、§7.1、§7.2、§8.2
 - supersedes：无（新增）。ADR-0001 §D8"默认直接生效、自动留痕；不设候选→评估→灰度→晋升的强制流水线"保留有效；
   本 ADR 补充可选门控与预测对照。ADR-0001 §D7"何时需人工"由部署环境声明保留有效；本 ADR 补充其对象载体。
+- 修订：v0.7.0（2026-09-08）Approval 结果集、事件配对与审批面细则由 [ADR-0011](0011-approval-result-set-and-approval-surface.md) 承接；见文末修订历史。
 
 ## 背景
 
@@ -37,55 +38,66 @@ AHE（arXiv:2604.25850）的核心发现是把每次编辑变成"预测 → 下�
 |---|---|
 | `id`, `execution_id`, `activity_id` | 归属 |
 | `subject` | `effect_candidate` / `grant_expansion` / `adjustment` / `handoff_accept` / `memory_admit` / `verification_override` |
-| `reason` | 触发规则：`policy_decision` 引用（`policy_version` + `rule_id`）、来源标签冲突、F9 扩张判定 |
-| `presentation` | 呈现给人的最小上下文：候选摘要、参数（含来源标签）、预算影响、可逆性、Verifier 预检结果；引用 Artifact，不复制正文 |
-| `options` | `approve_once` / `approve_for_activity` / `approve_for_capability` / `deny` / `modify(params)` / `defer(until)` |
-| `decision`, `decided_by`, `decided_at` | 决定者必须是 Principal |
-| `expiry`, `on_expiry` | `deny`（缺省，fail-closed）/ `escalate` / `keep_waiting` |
-| `derived` | 决定派生出的对象引用（见 D2） |
+| `reason` | 触发规则：`policy_decision` 引用（`policy_version` + `rule_id`）、来源标签冲突、F9 扩张判定、审批容量 |
+| `subject_ref` | 被审对象引用 `{action_intent_id?, params_digest?, object_ref?}`：`subject = effect_candidate` 时填 `action_intent_id` + `params_digest`，其他 subject 填 `object_ref` 指向对应对象；**不复制工具参数** |
+| `presentation` | 呈现给人的最小上下文：候选摘要、预算影响、可逆性、Verifier 预检结果；参数由审批面按 `subject_ref` 渲染时读取并附来源标签；引用 Artifact，不复制正文 |
+| `options` | `approve_once` / `approve_for_activity` / `approve_for_capability` / `deny` / `modify(params)` / `defer(until)`；决定 `derived` 与 `params_digest`，不决定 `result` |
+| `result`, `decided_by`, `decided_at` | `result ∈ approved_once \| rejected \| cancelled \| unavailable`（封闭）；决定者必须是 Principal |
+| `expiry`, `on_expiry` | `deny`（缺省，fail-closed，到期 → `rejected`）/ `escalate` / `keep_waiting` |
+| `derived` | 决定派生出的对象引用（见 D2）；只有 `result = approved_once` 可非空 |
 | `batch_ref` | 同类候选合并为一次审批 |
 
-- 状态：`pending` / `approved` / `denied` / `modified` / `expired`。事件：`approval/requested`、`approval/granted`、
-  `approval/denied`、`approval/modified`、`approval/expired`。`approval/requested` 携带 `policy_decision`。
+- 状态：**`pending` / `approved_once` / `rejected` / `cancelled` / `unavailable`**（`pending` 唯一非终态）。事件只有两个且**必须配对**：
+  `approval/asked{approval_id, subject, subject_ref, policy_decision, expiry}` 与 `approval/decided{approval_id, result, option?, params_digest?,
+  decided_by, derived[]}`。`approval/asked` 携带 `policy_decision`。任一无法落账 → 以 `unavailable.approval` 拒绝整个请求（fail-closed）。
+  细则见 [ADR-0011](0011-approval-result-set-and-approval-surface.md) §D1–§D3。
 - Runtime 只能观察到 `needs_human(approval_id)`（Policy 要求人工确认）或 `auth_required(approval_id)`
-  （`subject = grant_expansion`）；ABI 中不存在 `decide_approval`。
-- Capability API：`approval.list(filter)`、`approval.observe(id)`、`approval.decide(id, option, params?)`、
+  （`subject = grant_expansion`）；ABI 中不存在 `decide_approval`。审批事实（`presentation`、`decided_by`、`reason`）不进入 Runtime 会话账本的
+  模型可见面，Runtime 只收到 `approval_result{approval_id, result, params_digest, grants_summary?}`。
+- Capability API：`approval.list(filter)`、`approval.observe(id)`、`approval.decide(id, option, params?) -> {result, …}`、
   `approval.batch_decide(batch_ref, option)`。`decide` 的调用者必须解析为 Principal。
-- 负例：一个 `approval/granted` 事件的 `principal` 解析为 Execution 或 Runtime 而非人类 / 系统 Principal → 失败；
-  `presentation` 中内联了 Artifact 正文而非引用 → 失败；`expiry` 到期且 `on_expiry` 缺省时状态不是 `expired`
-  且后续动作不是拒绝 → 失败。
+- 负例：一个 `approval/decided` 事件的 `decided_by` 解析为 Execution 或 Runtime 而非人类 / 系统 Principal → 失败；
+  `presentation` 中内联了 Artifact 正文而非引用，或 `approval/asked` 载荷含参数明文 → 失败；`expiry` 到期且 `on_expiry` 缺省时 `result`
+  不是 `rejected` → 失败；`approval/decided` 无配对 `approval/asked` → 失败。
 
-### D2 · `approve_for_*` 是权限扩张的唯一合法路径
+### D2 · `approve_for_*` 是权限扩张的唯一合法路径；只有 `approved_once` 结果派生
 
 - `approve_once`：仅放行本次候选；不派生对象。
 - `approve_for_activity`：`fysund` 自动签发一条衰减 Grant（`grant/issued`，`derived` 记录其 id），范围限于本
   Activity，且 ⊆ 父 Grant。
-- `approve_for_capability`：`fysund` 自动产生一条 Adjustment（`scope = capability_default`，`derived` 记录其 id）
-  并留痕；该 Adjustment 仍受 D5 的预测与评估规则约束。
-- `modify(params)`：改写候选参数后放行，对应 `policy_decision.outcome = modify`；改写后的参数记入 ActionIntent。
+- `approve_for_capability`：`fysund` 自动产生一条 Adjustment（`scope = capability_default`，`derived` 记录其 id，
+  `statement = approval.reason`）并留痕；该 Adjustment 仍受 D5 的预测与评估规则约束。
+- `modify(params)`：改写候选参数后放行，对应 `policy_decision.outcome = modify`；改写后的参数记入 ActionIntent，
+  `approval/decided.params_digest` 记新 digest。
+- 以上放行类 option 的 `result` **一律 `approved_once`**；`options` 只决定 `derived`。**只有 `result = approved_once` 的 Approval 可以派生**
+  `grant/issued` / `adjustment/applied`。
 - 这是 F9（[ADR-0004](0004-provenance-labels-and-monotonic-privilege.md) §D4）中"扩张必须经 Approval"的
   唯一实现路径；除此之外账本中不得出现扩张性的 `grant/issued`。
 - 负例：一条 `grant/issued` 的范围大于同 Execution 先前的有效权限集，且其 `causation_id` 不指向一个
-  `approval/granted` → 失败。
+  `approval/decided{result: approved_once}` → 失败；`result = rejected` 的 Approval 派生出任何对象 → 失败。
 
 ### D3 · 审批容量进入预算模型
 
-- `Activity.constraints` 新增 `max_pending_approvals`（同时未决 Approval 上限）与 `approval_sla`（期望决定时限）。
-- 超过 `max_pending_approvals` 时，Activity 进入 `input_required` 而不是继续堆积候选；`approval_sla` 超时由
+- `Activity.constraints` 新增 `max_pending_approvals`（同时未决 Approval 上限）与 `approval_sla`（期望决定时限）；
+  v0.7.0 再增 `approval_rate_limit`（单位时间 `approval/asked` 上限）与 `consecutive_rejections_alert`（连续拒绝阈值 → Activity `blocked`），
+  见 [ADR-0011](0011-approval-result-set-and-approval-surface.md) §D6。
+- 超过 `max_pending_approvals` 或 `approval_rate_limit` 时，Activity 进入 `input_required` 而不是继续堆积候选；`approval_sla` 超时由
   `on_expiry` 决定后续动作。
 - Activity 状态机新增 `input_required`（等人：Approval 未决或需要用户输入），与 `waiting`（等触发）分开；
-  事件 `activity/input-required`。Execution 等 Approval 时自身为 `waiting`，其所属 Activity 为 `input_required`。
+  事件 `activity/input-required`。Execution 等 Approval 时自身为 **`waiting{reason: approval}`**，其所属 Activity 为 `input_required`；
+  Execution `waiting` 的 `reason ∈ trigger | approval | input`（事件 `execution/waiting{reason}`），使等触发、等审批、等输入三种等待在账本中可区分。
 - 对应 A2A `TASK_STATE_INPUT_REQUIRED`；Handoff 也有 `input_required` 与 `auth_required` 两态。
-- 负例：一个 Activity 有未决 Approval 却处于 `waiting` 而非 `input_required` → 失败；未决 Approval 数超过
-  `max_pending_approvals` 后仍出现新的 `approval/requested` → 失败。
+- 负例：一个 Activity 有未决 Approval 却处于 `waiting` 而非 `input_required` → 失败；Execution 因未决 Approval 等待却 `waiting{reason: trigger}`
+  → 失败；未决 Approval 数超过 `max_pending_approvals` 后仍出现新的 `approval/asked` → 失败。
 
 ### D4 · 崩溃恢复中的 Approval 水位
 
 - 崩溃前未决的 Approval 在恢复后仍为 `pending`，不得被 Runtime 或 `fysund` 视为已批。
-- `resume_execution` 在 `effect_watermark` 之外携带 **Approval 水位**（恢复点之前已关闭的 Approval 集合摘要）；
+- `resume_execution` 在 `effect_watermark` 之外携带 **Approval 水位**（恢复点之前已 `approval/decided` 的 Approval 集合摘要）；
   Runtime 据此知道哪些候选仍在等待。
-- 恢复顺序不变（03 §6：读投影 → 校验 epoch → 对账 outcome-unknown → resume），在对账步骤中同时列出未决 Approval。
-- 负例：崩溃恢复后，一条 `pending` Approval 对应的 Effect 出现 `effect/authorized` 而无 `approval/granted` → 失败。
+- 恢复顺序（03 §6：读投影 → 校验 Policy 版本 → 校验 epoch → 对账 outcome-unknown → Approval 水位 → **重新武装** → resume），
+  在对账步骤中同时列出未决 Approval；重新武装步骤见 ADR-0011 §D8（含非 `local_read` 类别的 Activity 缺省 `paused{reason: rearm_required}`）。
+- 负例：崩溃恢复后，一条 `pending` Approval 对应的 Effect 出现 `effect/authorized` 而无 `approval/decided{result: approved_once}` → 失败。
   此负例进入 M3 验收。
 
 ### D5 · Adjustment 携带预测与评估；证据门控为可选
@@ -103,9 +115,12 @@ AHE（arXiv:2604.25850）的核心发现是把每次编辑变成"预测 → 下�
 - ADR-0001 §D8 不变：`evidence_gate` 缺省关闭，Adjustment 默认直接生效并自动留痕；本 ADR 只让"是否更好"可被
   系统而非用户回答。
 - `capability.health(id)` 从 evidence 与 Adjustment 历史折叠出冗余、过期、反复失败的 checklist 项。
+- `predicted_effect` **可选**：为空时允许，此时 `evaluated_against.result` 恒为 `inconclusive`（没有预测就无法被支持或反驳）；
+  给出 `predicted_effect` 但缺 `statement` → `adjustment.apply` / `os.propose_adjustment` 拒绝；由 `approve_for_capability` 派生的 Adjustment
+  自动填 `statement = approval.reason`。
 - 负例：`evidence_gate.enabled = true` 时未跑回归集的 `adjustment/promoted` → 失败（进入 M4 验收）；一条
-  Adjustment 生效后 `window` 内有 Verification 到达但 `evaluated_against` 未填充 → 失败；`predicted_effect` 缺
-  `statement` → `propose_adjustment` 拒绝。
+  Adjustment 生效后 `window` 内有 Verification 到达但 `evaluated_against` 未填充 → 失败；给出 `predicted_effect` 但缺
+  `statement` 的提案被接受 → 失败；`predicted_effect` 为空的 Adjustment 其 `evaluated_against.result` 出现 `supported` / `refuted` → 失败。
 
 ### D6 · Verification 扩展
 
@@ -118,22 +133,29 @@ AHE（arXiv:2604.25850）的核心发现是把每次编辑变成"预测 → 下�
 - `inconclusive` 是合法结果，不得被 Runtime 或应用解释为通过；事件 `verification/inconclusive`。
 - Policy 可为 Effect 类别或 Capability 设定最低 verifier 要求（[ADR-0003](0003-policy-object-and-language.md) §D5）。
 - `Capability.contract.quality` 采用 Skill Contract 骨架 `(P, O, A, V, F)`，V 为 checklist，每项标注 `verifier_kind`
-  （08 开放问题 4 的解法）。
+  （开放问题 Q4 的解法，剩余为 `model_judge` 校准集来源，12 §7）。
 - 负例：`verdict = inconclusive` 的 Verification 触发 `handoff/verified` 或 `activity/completed` → 失败；
   同模型自评的 Verification `independence` 非 `not_independent` → 失败。
 
 ### D7 · Approval 的传输载体
 
-Approval 对象与传输载体分离；同一 Approval 可经以下任一载体呈现与决定：
+Approval 对象与传输载体分离；**审批面只由 `fysund` 提供**（[ADR-0011](0011-approval-result-set-and-approval-surface.md) §D5）。
+同一 Approval 可经以下任一载体呈现与决定：
 
 | 载体 | 条件 |
 |---|---|
-| MCP `elicitation/create` | MCP client 支持 elicitation 时，经 MCP 守卫下发（含 URL-mode） |
-| Web UI | Approval 呈现面是 Web UI 的第一优先级 |
+| MCP `elicitation/create` | MCP client 支持 elicitation 时，由 `fysund` 作为 server 发起、经 MCP 守卫下发（含 URL-mode）；应答绑定该 session 的 Principal |
+| Web UI | `fysund` 静态服务；Approval 呈现面是 Web UI 的第一优先级 |
 | CLI `fysun` | `approval.list / decide` 的命令行形态 |
-| `deliver_input(approval_result)` | 父 Execution 或外部 A2A 侧把决定送回；决定者仍必须解析为 Principal |
 
-- 负例：经 MCP elicitation 返回的决定被直接写为 `approval/granted` 而未解析出 Principal → 失败。
+- `deliver_input(approval_result)` 是决定**送达 Runtime** 的投递路径（OS → Runtime），不是审批面；父 Execution 或外部 A2A 侧要做决定仍须经上表载体，
+  决定者必须解析为 Principal。
+- **Runtime 的文本输出永不构成审批面**：聊天通道里的"批准"文本、模型生成的确认控件、Runtime 自绘的审批卡片都不产生 `approval/decided`
+  （T11 审批面伪造）。DSH 自身的审批卡片在 `fysun` profile 下失效，`fysun-approval` 在 `approval/request` waterfall 拦截、不 `next()`、全部转给
+  `fysund`。
+- Policy 可对特定 `Approval.subject` 强制带外（只接受 Web UI / CLI，不发起 elicitation）。
+- 负例：经 MCP elicitation 返回的决定被直接写为 `approval/decided` 而未解析出 Principal → 失败；DSH 原生卡片应答落账 → 失败；
+  聊天文本"批准"产生 `approval/decided` → 失败。
 
 ## 否决的替代方案
 
@@ -141,27 +163,41 @@ Approval 对象与传输载体分离；同一 Approval 可经以下任一载体�
 - **强制候选→评估→灰度→晋升流水线。**违背 ADR-0001 §D8"演进轻量"；OPC 场景中多数 Adjustment 是改一句
   Prompt，强制流水线的成本高于收益。本 ADR 以可选 `evidence_gate` 替代。
 - **把审批交给 Runtime 内部。**DSH 的 `ctx.approval` 是一次性 turn 级审批，决定不入治理账本、不能派生 Grant、
-  Runtime 可自行"批准"（T9）；与 F1 冲突。`fysun-approval` 保留为 Level-2 控制点适配器，只做呈现转发。
+  Runtime 可自行"批准"（T9）；与 F1 冲突。`fysun-approval` 保留为控制点适配器，只做拦截转发（不 `next()`），不持有决定、不呈现。
 - **Confidence 数值向量作为审批触发。**AOS 自己警告"数值会制造误导性精度"；FysunOS 只取动作映射
-  （`assurance{level, basis[], dependence}` 为可选字段），`ESCALATE` = Approval。
+  （`assurance{level, basis[], dependence}` 为可选字段）。控制动作 `escalate` 映射为 Policy `outcome = approve`，是 Activity 子系统的内部词汇，
+  不是 Policy 输出的第五个值。
 
 ## 后果
 
-- Web UI 的 Approval 呈现面成为第一优先级（08 开放问题 3 不变，但优先级明确）。
+- Web UI 的 Approval 呈现面成为第一优先级（开放问题 Q3 不变，但优先级明确）。
 - M3 验收新增 Approval 闭环：闭环第 2 步"先看过再发布"通过 Approval 对象实现；崩溃恢复后未决 Approval 不被
-  视为已批；Handoff 状态可无损映射到 A2A TaskState。
+  视为已批；Handoff 状态可无损映射到 A2A TaskState；Execution `waiting.reason` 正确。
 - M4 验收新增预测→评估：一次 Adjustment 带 `predicted_effect`，下一 Execution 的 Verification 自动填充
-  `evaluated_against`；`evidence_gate` 开启时未跑回归集的 promote 被拒。
-- 度量新增三项：人工介入率（`approval/requested` / Execution）、回滚率（`adjustment/reverted` / `adjustment/applied`）、
-  验证独立性比例（`independence != not_independent` 的 Verification 占比）。
-- `fysun-dsh` 的 `fysun-approval` 子组件语义收窄为转发与呈现，不再持有决定。
-- 每个 Approval 增加账本事件与 Web UI / CLI 的呈现成本；`batch_ref` 缓解 OPC 场景中的审批洪泛（T10）。
+  `evaluated_against`；`evidence_gate` 开启时未跑回归集的 promote 被拒；`predicted_effect` 为空 → `evaluated_against` 恒 `inconclusive`。
+- 度量新增：人工介入率（`approval/asked` / Execution）、回滚率（`adjustment/reverted` / `adjustment/applied`）、
+  验证独立性比例（`independence != not_independent` 的 Verification 占比）、审批不可用率（`result = unavailable` / `approval/asked`）。
+- `fysun-dsh` 的 `fysun-approval` 子组件语义收窄为拦截转发，不再持有决定、不再呈现；DSH 审批卡片失效。
+- 每个 Approval 增加账本事件与 Web UI / CLI 的呈现成本；`batch_ref` 与 `approval_rate_limit` 缓解 OPC 场景中的审批洪泛（T10）。
 
 ## 待后续 ADR 的问题
 
 - `on_expiry = escalate` 的升级目标（另一 Principal、另一载体）如何声明。
-- 多主体下 Approval 的决定权分配与分布式一致性（与 08 开放问题 5、9 合并考虑）。
+- 多主体下 Approval 的决定权分配与分布式一致性（边缘部分见 [ADR-0010](0010-edge-offline-ledger-consistency.md)；多主体继续开放）。
 - `downstream_outcome` verifier 的时间窗与归因规则。
 - judge 类 verifier 的校准阈值是否写入 Policy（参考 arXiv:2608.00794 的 α≥0.67 / 0.70 / 0.80 分级）。
 
-其余见 [08 MVP 计划 §7](../design/08-mvp-plan.md#7-开放问题待后续-adr)。
+其余见 [12 MVP 计划 §7](../design/12-mvp-plan.md)。
+
+## 修订历史
+
+- v0.7.0（2026-09-08）：§D1 状态集 → `pending / approved_once / rejected / cancelled / unavailable`，事件 → `approval/asked` / `approval/decided`
+  且必须配对、任一无法落账以 `unavailable.approval` 拒绝，`decision` 字段改 `result`，新增 `subject_ref`（引用 `action_intent_id` + `params_digest`，
+  不复制参数），`presentation` 去"参数"，增审批事实不进模型可见面；§D2 保留 `approve_for_*`，加"放行类结果一律 `approved_once`、只有
+  `approved_once` 派生"，`approve_for_capability` 派生自动 `statement = approval.reason`；§D3 增 `approval_rate_limit` / `consecutive_rejections_alert`
+  引用与 Execution `waiting.reason`；§D4 水位与恢复顺序更新（增 Policy 版本校验、重新武装）；§D5 负例改"`predicted_effect` 可选、为空时
+  `evaluated_against` 恒 `inconclusive`、给出但缺 `statement` → 拒绝"；§D7 载体表去 `deliver_input` 行（它是投递不是审批面）、加"审批面只由
+  `fysund` 提供、Runtime 文本输出不构成审批面、DSH 卡片失效"；否决段"ESCALATE = Approval"改"`escalate → approve` 映射为内部词汇"，
+  `fysun-approval` 表述改拦截转发；后果段度量分子改 `approval/asked`、增审批不可用率；全文旧事件名替换。为什么：蓝图 §0 C1-1（`predicted_effect`
+  三处互斥）、C1-4（四值与控制动作）、C1-6（`waiting` 歧义）；§I.1 决策 11（DSH 审批 `fysund` 唯一 answerer）、12；§I.2 H-1（结果集与
+  `approve_for_*`）、H-4（T11）；细则由 ADR-0011 承接。对应蓝图：§C.1 ADR-0005 行。

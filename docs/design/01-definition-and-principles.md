@@ -1,8 +1,9 @@
 # 01 · 定义与设计原则
 
-- 状态：设计稿 v0.6.0（2026-09-07）
-- 变更依据：[前沿对照审查报告](../research/20260907-frontier-review-and-recommendations.md) 与 ADR-0002 ~ ADR-0006
-- 决策依据：[ADR-0001](../adr/0001-founding-decisions.md)、[ADR-0002](../adr/0002-protocol-first-runtime-boundary.md)、[ADR-0004](../adr/0004-provenance-labels-and-monotonic-privilege.md)
+- 状态：设计稿 v0.7.0（2026-09-08）
+- 变更依据：[v0.7.0 全量重构蓝图](../research/20260908-v0.7.0-refactor-blueprint.md)；ADR-0001 ~ ADR-0006（v0.7.0 修订）与 ADR-0007 ~ ADR-0012
+- 决策依据：[ADR-0001](../adr/0001-founding-decisions.md)、[ADR-0002](../adr/0002-protocol-first-runtime-boundary.md)、[ADR-0004](../adr/0004-provenance-labels-and-monotonic-privilege.md)、[ADR-0007](../adr/0007-runtime-native-tools-and-conformance-scope.md)、[ADR-0011](../adr/0011-approval-result-set-and-approval-surface.md)
+- 术语以 [00 术语与对象命名对照表](00-terminology.md) 为唯一基准
 
 ## 1. FysunOS 的定义
 
@@ -13,9 +14,11 @@
 > 运行并从反馈中改进的运行服务。**
 
 可判定限定：这里的"任意 Agent 实现、Runtime 与环境"指**任何实现 Runtime ABI 最小面
-（MCP 客户端 + 最小生命周期 RPC）的 Runtime**（见 [04 接口与 ABI](04-abi.md)、
-[00 术语 §7](00-terminology.md#7-runtime-abi)）。不满足最小面的 harness 不在承诺范围内；
-承诺是否成立由该 Runtime 是否通过 Runtime ABI 资格化判定，不由文字判定。
+（MCP 客户端 + 最小生命周期 RPC）的 Runtime**（见 [05 Runtime ABI](05-runtime-abi.md)、
+[00 术语 §7](00-terminology.md#7-runtime-abi)）。最小面包括 `describe()` **如实声明**
+`native_effect_tools[]`（Runtime 内置、不经 MCP 守卫、可产生外部效果的工具）；**声明不实的 Runtime 不在承诺范围**
+（[ADR-0007](../adr/0007-runtime-native-tools-and-conformance-scope.md) §D1）。不满足最小面的 harness 不在承诺范围内；
+承诺是否成立由该 Runtime 是否通过 Runtime ABI 资格化（`runtime/qualified`，[07 §1](07-runtime-onboarding.md)）判定，不由文字判定。
 
 ### 1.2 完整定义
 
@@ -53,13 +56,13 @@ FysunOS 采用 AOS 参考架构（*The Agent Operating System*，arXiv:2608.0321
 
 | AOS 平面 / 职责 | FysunOS 对应 | 供给声明 |
 |---|---|---|
-| **Control & Governance Plane** — intent、policy、trust、authority、confidence、auditability、observability、human oversight | Authority 子系统（Principal / Scope、Grant、ActionIntent → Effect → Receipt → Verification、Approval、Policy）、治理账本、可选 `assurance` | **全量供给**（含 Approval 与可选 assurance） |
-| **Runtime & Coordination Plane** — agent lifecycle、workflow coordination、model/tool routing、context & memory coordination、scheduling、traffic management、runtime assurance | Activity 子系统（生命周期、触发与调度、检查点、Handoff）、Resource 子系统（模型代理、上下文装配、Memory 准入）、Verifier | **部分供给**：生命周期、调度、交接、上下文/记忆协调、验证；**不供给**：决策核心 loop、沙箱、traffic management（留给 Runtime 与网关） |
+| **Control & Governance Plane** — intent、policy、trust、authority、confidence、auditability、observability、human oversight | Authority 子系统（Principal / Scope、Grant、ActionIntent → Effect → Receipt → Verification、Approval、Policy、Node）、治理账本、可选 `assurance` | **供给（Trust 除外，见 [12 §7](12-mvp-plan.md) 开放问题）**：含 Approval 与可选 `assurance`；Trust 对象（按 Runtime / 工具 / 外部 Agent 的证据化信任）无显式对象 |
+| **Runtime & Coordination Plane** — agent lifecycle、workflow coordination、model/tool routing、context & memory coordination、scheduling、traffic management、runtime assurance | Activity 子系统（生命周期、触发与调度、检查点、Handoff）、Resource 子系统（模型代理、上下文装配、Memory 准入、Runtime 目录）、Verifier | **部分供给**：生命周期、调度、交接、上下文/记忆协调、验证；**不供给**：决策核心 loop、沙箱、traffic management（留给 Runtime 与网关） |
 | **平台服务** — 宿主 OS、容器、物理基础设施 | §6 明确不做 | 不供给 |
 
 对象级映射（AOS 概念 ↔ FysunOS 对象）见 [02 对象模型 §4](02-object-model.md)；conformance
-声明（MVP 满足哪些不变量、哪些控制点可选、哪些威胁不在范围）见
-[09 威胁模型](09-threat-model.md)。
+声明（MVP 满足哪些不变量、哪些控制点可选、哪些威胁不在范围；按 Runtime 类型分列）见
+[13 威胁模型与 conformance 声明](13-threat-model.md)。
 
 ## 2. Capability 的定义
 
@@ -69,8 +72,9 @@ FysunOS 采用 AOS 参考架构（*The Agent Operating System*，arXiv:2608.0321
 一项 Capability 由两部分组成，二者必须分开：
 
 - **行为契约**（对外承诺，迁移时保持）：输入、输出或持续行为；怎样算做好（质量目标，机器
-  可判定表示法见 [07 §1.5](07-evolution-and-edge.md#15-质量目标的表示法)）；成本、时间、
-  权限与风险边界；验证方式。功能、质量、资源/风险都属于契约，但由不同机制检查（功能与
+  可判定表示法见 [10 §1.5](10-evolution.md)）；成本、时间、
+  权限与风险边界（含 `bounds.tool_effects[]`：契约用到的每个工具的 `effect_category`，[02 §2.1](02-object-model.md)）；验证方式。
+  功能、质量、资源/风险都属于契约，但由不同机制检查（功能与
   质量由 Verifier；资源与风险由 Grant / 预算 / Policy）。
 - **实现与运行描述**（可整体替换）：Prompt、Skills、知识与记忆配置、工具、执行方法，以及
   对决策核心、Runtime 的要求。实现包采用 Agent Skills 规范（`SKILL.md`），FysunOS 不定义
@@ -98,7 +102,7 @@ FysunOS 采用 AOS 参考架构（*The Agent Operating System*，arXiv:2608.0321
 | P5 | **协作是普通能力行为** | 没有多 Agent 子系统、没有特殊 Manager 身份；委派发生时系统自动记录交接事实 |
 | P6 | **调整默认轻量，检查只在风险边界** | 扩权、新增外部动作、提高预算、影响设备安全时执行部署 Policy；其余直接生效、自动留痕、可回退 |
 | P7 | **部署环境声明策略，OS 执行边界** | 不内置统一风险等级；能力不得自扩权、不得隐瞒不满足运行条件；策略以版本化 Policy 对象承载 |
-| P8 | **不重造决策核心** | 凡 Runtime 已具备且不涉及权威的能力，一律通过 Runtime ABI 复用（凡有业界标准的边界用标准表达：MCP / A2A / Agent Skills；DSH 为第一个 Level-2 参考适配器） |
+| P8 | **不重造决策核心** | 凡 Runtime 已具备且不涉及权威的能力，一律通过 Runtime ABI 复用（凡有业界标准的边界用标准表达：MCP / A2A / Agent Skills；DSH 为声明全部六个控制点的参考适配器 `fysun-dsh`，[08](08-dsh-adapter.md)） |
 
 ## 4. 系统承担的可靠性底线
 
@@ -109,26 +113,31 @@ Runtime 偏好或"自校正"而放松：
 |---|---|---|
 | F1 | 唯一权威写入者 | 只有 `fysund` 可以签发 Grant、推进 Activity/Execution/Effect/Verification 状态、签发与关闭 Approval、记账预算、写权威账本。Runtime、UI、CLI、SDK、第三方 Agent 都是客户端 |
 | F2 | 概率组件只产候选 | 模型与任何第三方 Agent 的输出（含工具调用）都是候选；准入、调度、Effect 提交、对账、最终验收是确定性的 daemon 操作 |
-| F3 | 外部效果先记录再执行 | 每个外部或不可逆 mutation 都先持久化 ActionIntent 与 Effect、带幂等键、在 fencing 下分发与对账；工具成功不等于完成 |
+| F3 | 外部效果先记录再执行 | 每个外部或不可逆 mutation 都先持久化 ActionIntent 与 Effect、带幂等键、在 fencing 下分发与对账；工具成功不等于完成。MCP-only Runtime 下范围限于经 MCP 守卫的工具面（[ADR-0007](../adr/0007-runtime-native-tools-and-conformance-scope.md)） |
 | F4 | 完成由独立验证判定 | Activity 阶段完成需要独立 Verifier 对照契约与已对账 Effect 判定；进程退出、模型说"完成"、Provider 返回、外部回执都不够 |
-| F5 | secret 隔离 | Provider 与用户 secret 只进 Secret Store 与批准的非日志输入路径；Runtime 进程只见 `SecretRef`，请求经 daemon 代理 |
+| F5 | secret 隔离（范围：OS 管理的 secret 与经 `fysund` 代理的 Provider） | OS 管理的 secret 与经 `fysund` 代理的 Provider 只进 Secret Store 与批准的非日志输入路径；Runtime 进程只见 `SecretRef`。harness 自持的模型凭据不在 F5 范围（[13 §4](13-threat-model.md)）；部署者应把 harness 的 OpenAI 兼容 base URL 指向 `fysund` 代理，使模型请求进入 F5 范围并计量（[07 §5](07-runtime-onboarding.md)） |
 | F6 | 契约与负例不为实现让路 | 公共契约、状态迁移、错误、负例向量不因某个实现不通过而删改；变更走正式流程。范围含 Policy：策略本身版本化、可追溯，不得为放行某次实现而静默改写 |
-| F7 | 部署策略声明、能力不自扩权 | 环境决定什么动作可自动执行；能力不得自行扩大 Grant、不得隐瞒不满足的运行条件 |
+| F7 | 部署策略声明、能力不自扩权 | 环境决定什么动作可自动执行；能力不得自行扩大 Grant、不得隐瞒不满足的运行条件。MCP-only Runtime 下范围限于经 MCP 守卫的工具面（[ADR-0007](../adr/0007-runtime-native-tools-and-conformance-scope.md)） |
 | F8 | 未知外部改动受保护 | 自主代理不覆盖、回退、混入非本任务的并发改动 |
-| F9 | Execution 内有效权限单调收窄 | 一次 Execution 生命周期内，有效权限集（Grant ∩ Policy 允许集 ∩ 工具面）只能因两类事件变化：收窄自动生效；任何扩张必须经 Approval，且扩张后仍 ⊆ 父 Grant。可写成负例向量：构造试图扩权的候选，断言账本中不出现无 Approval 的 `grant/issued` |
+| F9 | Execution 内有效权限单调收窄 | 一次 Execution 生命周期内，有效权限集（Grant ∩ Policy 允许集 ∩ 工具面）只能因两类事件变化：收窄自动生效；任何扩张必须经 Approval（`result = approved_once`），且扩张后仍 ⊆ 父 Grant。可写成负例向量：构造试图扩权的候选，断言账本中不出现无 Approval 的 `grant/issued`。MCP-only Runtime 下范围限于经 MCP 守卫的工具面（[ADR-0007](../adr/0007-runtime-native-tools-and-conformance-scope.md)） |
+
+F3 / F7 / F9 对 MCP-only Runtime 的范围限定是**如实声明**而非放松：这类 Runtime 自带的原生（非 MCP）工具产生的外部效果不经守卫，
+FysunOS 不对其宣称 F3 / F7 / F9 成立；conformance 表按 Runtime 类型分列（[13 §6](13-threat-model.md)）。hooks.json 阻断路径只能阻断、
+不能记账，不计入 conformance 主路径（[06 §9](06-mcp-guard.md)）。
 
 **来源标签作为 F2 的配套机制。** 候选不仅要被当作候选，其参数值的**来源**也要可见：每个进入
-上下文的片段、每个工具结果、每个 Artifact 携带 `label{source_principal, integrity, origin_ref}`，
-`integrity` 取 `trusted_user` / `trusted_system` / `verified_data` / `untrusted_external`；标签由
-Resource 子系统在装配时赋予，Runtime 不能改写；Policy 可引用标签（例如"外部发送类 Effect 的
-收件人参数含 `untrusted_external` 来源 → `approve`"）。这不是完整的 CaMeL 级信息流控制，而是
-在协议边界即可实现的"标签 + 引用监视器"；完整信息流控制列为后续研究（见
-[09 威胁模型 §7](09-threat-model.md#7-开放问题)）。
+上下文的片段、每个工具结果、每个 Artifact 携带 `label{source_principal, integrity, origin_ref, flags?}`，
+`integrity` 取 `trusted_user` / `trusted_system` / `verified_data` / `untrusted_external`；**工具结果一律 `untrusted_external`**，
+唯一升级路径是 Verification 或 Memory 准入；`flags` 由守卫在结果回传前分类（`authority_claim` / `secret_shaped`）。标签由
+Resource 子系统在装配时赋予，Runtime 不能改写；Policy 可引用标签与 `flags`（例如"外部发送类 Effect 的
+收件人参数含 `untrusted_external` 来源 → `approve`"、"`secret_shaped` 结果 → `modify` 脱敏"）。这不是完整的 CaMeL 级信息流控制，而是
+在协议边界即可实现的"标签 + 引用监视器"；完整信息流控制与 Trust 对象列为开放问题（见
+[12 §7](12-mvp-plan.md)）。
 
 F1–F5 与 F8 直接迁移自 CognitiveOS 公理 A1–A5、A8；F6 对应 A6；F7 是首轮讨论新增；F9 依据
 Progent 单调限制（arXiv:2504.11703）与 AOS 委派单调性（arXiv:2608.03214），决策见
 [ADR-0004](../adr/0004-provenance-labels-and-monotonic-privilege.md)。
-证据晋升纪律（原 A7）在 FysunOS 中作为工程流程规则而非系统底线保留，见 [08 MVP 计划](08-mvp-plan.md)。
+证据晋升纪律（原 A7）在 FysunOS 中作为工程流程规则而非系统底线保留，见 [12 MVP 计划](12-mvp-plan.md)。
 
 ## 5. 设计目标与优势
 
@@ -138,11 +147,11 @@ Progent 单调限制（arXiv:2504.11703）与 AOS 委派单调性（arXiv:2608.0
 | 工作可持续 | 会话结束、进程重启、引擎替换，任务和长期活动都不从头开始 |
 | 资源可适配 | 同一能力在桌面用远端模型与浏览器工具，在边缘用本地模型与传感器；不满足条件时明确报告，不静默降质 |
 | 协作有连续性 | 委派、产物、依赖、进展是系统事实，不只活在某个主 Agent 的聊天记录里 |
-| 改进可积累 | 校准与反馈影响后续行为，自动留痕、可回退，不要求走重型晋升流水线；每次调整带预测，系统自动对照后续验证结果 |
-| 轻量易用 | 复杂性由系统吸收；不要求使用者维护审批、版本晋升或迁移流程；审批是一级对象，等人与等触发在 UI 上区分 |
+| 改进可积累 | 校准与反馈影响后续行为，自动留痕、可回退，不要求走重型晋升流水线；调整可带预测，系统自动对照后续验证结果 |
+| 轻量易用 | 复杂性由系统吸收；不要求使用者维护审批、版本晋升或迁移流程；审批是一级对象，等人与等触发在 UI 上区分，审批面统一由 `fysund` 提供 |
 
 任务完成率、成本、耗时、人工介入率、回滚率、验证独立性比例是**需要实测**的收益指标（定义见
-[08 §4](08-mvp-plan.md#4-效率与性能的度量)）；"符合 FysunOS 标准"本身不证明 Agent 更有能力。
+[12 §4](12-mvp-plan.md)）；"符合 FysunOS 标准"本身不证明 Agent 更有能力。
 后续应在同模型、同预算或明确披露成本差异的条件下，与直接使用 Agent 的效果比较。
 
 ## 6. 明确不做的事
@@ -155,6 +164,10 @@ Progent 单调限制（arXiv:2504.11703）与 AOS 委派单调性（arXiv:2608.0
 - 不定义自己的实现包格式（采用 Agent Skills）；
 - 不自造策略语言（采用 Cedar 子集）；
 - 不自建记忆引擎（记忆引擎为可插拔 Resource 提供者，OS 只拥有准入、作用域、撤回）；
+- 不自建 Approval 呈现面以外的对话 UI；审批面只由 `fysund` 提供（Web UI、CLI、`fysund` 发起的 elicitation），Runtime 的文本输出与
+  自绘卡片不构成审批面（[ADR-0011](../adr/0011-approval-result-set-and-approval-surface.md) §D5）；
+- 不持有 Runtime 的 Loop 状态（armed / step 计数 / 继续策略），它属 Runtime 会话账本；OS 只握预算、取消、恢复边界与重新武装事件
+  （[03 §6](03-architecture.md)）；
 - 不自建 loop、prompt 装配、工具注册流水线、会话日志、compaction、subagent 传输、sandbox、
   聊天 UI、skills 加载、终端与 LSP——这些由 Runtime 提供，经 Runtime ABI 接入。
 
@@ -164,9 +177,9 @@ Progent 单调限制（arXiv:2504.11703）与 AOS 委派单调性（arXiv:2608.0
 |---|---|---|
 | **Capability** | 提供什么行为、怎样算做好、需要什么、在什么边界内 | 应用层声明，OS 读取其契约 |
 | **决策核心（Agent Core）** | 下一步做什么：模型调用、Prompt、规划、Skill 选择、继续/等待/重试/求助/停止 | Runtime 实现；OS 视其为可替换的候选产生者 |
-| **Resource** | 执行消耗什么：认知资源（模型、上下文、记忆、知识、Skill）与操作资源（计算、存储、网络、工具、传感器、执行器、其他 Agent） | OS 统一发现、授权、装配、计量 |
+| **Resource** | 执行消耗什么：认知资源（模型、上下文、记忆、知识、Skill）与操作资源（计算、存储、网络、工具、传感器、执行器、其他 Agent、已安装 Runtime） | OS 统一发现、授权、装配、计量 |
 | **Activity / Execution** | 工作是什么、现在到哪了 | OS 的核心管理对象 |
-| **Runtime** | 在哪里、由什么引擎跑 | 通过 Runtime ABI（MCP 守卫 + 最小生命周期 RPC + 可选控制点）向 OS 暴露控制点 |
+| **Runtime** | 在哪里、由什么引擎跑 | 通过 Runtime ABI（MCP 守卫 + 最小生命周期 RPC + 可选控制点）向 OS 暴露控制点，并如实声明其原生（非 MCP）工具（`native_effect_tools[]`）；已安装 Runtime 同时是一种 Resource 类型，经资格化后可被绑定 |
 
 四个曾经重叠的词的归位：**认知资源**是 Resource 的子类；**Loop** 是决策核心的控制策略
 （OS 只握预算、取消、恢复边界）；**Harness** 降为工程术语，指 OS 在一次 Execution 中围绕

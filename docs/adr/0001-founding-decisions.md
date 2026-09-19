@@ -1,10 +1,11 @@
 # ADR-0001 · FysunOS 创立决策
 
-- 状态：accepted
+- 状态：accepted（v0.7.0 修订）
 - 日期：2026-09-06
 - 决策者：owner
 - 背景来源：`agent-kernel` 仓库中关于 CognitiveOS 重定义的探讨记录
   （`docs/architecture/rebuild-0906`）及同日对 DeepSeek Harness 与 Cordis 的调研讨论。
+- 修订：v0.7.0（2026-09-08）按 [ADR-0002](0002-protocol-first-runtime-boundary.md) 落实对 §D2 的 supersede 并消除过时表述；见文末修订历史。
 
 ## 背景
 
@@ -28,12 +29,15 @@ FysunOS 是 **Agent 能力的操作系统**：定义描述能力、访问资源�
 Runtime**。"认知资源"归入 Resource；"Loop"归入决策核心的控制策略；"Harness"降为工程术语；
 "Runtime"收窄为承载与适配。一句话定义中"自进化"表述为"从反馈中改进"。
 
-### D2 · DSH 为默认参考 Runtime；Cordis 为 TS 侧组合后端
+### D2 · DSH 为声明全部六个控制点的参考适配器；Cordis 语义仅在适配器内部
 
-- DeepSeek Harness 作为默认参考 Runtime，以**隔离子进程**经 `sdk`/`acp` profile 进程外接入；
-  FysunOS 通过一个叠在 `dsh-base` 之上的 `fysun` bundle 替换凭据、审批、持久化、subagent
-  四个 seam 的 provider 并订阅工具流水线事件。**不 fork、不 vendor、不进程内链接。**
-- Cordis 通过语言无关的 Composition ABI 以 adapter 方式服务 TS Runtime；**不作为内核基底**。
+（v0.7.0 按 ADR-0002 §D1/§D5/§D6 修订；原文见 `docs/archive/v0.6.0/adr/0001-founding-decisions.md`。）
+
+- DeepSeek Harness 是**声明全部六个控制点的参考适配器** `fysun-dsh`，不是默认 Runtime，也不是唯一路径；任何实现 Runtime ABI 最小面
+  （MCP 客户端 + 最小生命周期 RPC）的 Runtime 都可接入。技术形态为叠在 `dsh-base` 之上的 bundle + `fysun` profile，以**隔离子进程**
+  经 `sdk` / `acp` profile 进程外接入。**不 fork、不 vendor、不进程内链接。**
+- Cordis 语义（可撤销效果、反应式依赖）仅作 `fysun-dsh` 适配器内部对 Cordis 生命周期的映射参考（[08 附录 A](../design/08-dsh-adapter.md)）；
+  **不作为内核基底**，不进入公共接口。
 - FysunOS 不再自建 loop、prompt 装配、工具流水线、会话日志、compaction、subagent 传输、
   sandbox、聊天 UI、skills、终端、LSP。
 
@@ -45,13 +49,13 @@ Runtime**。"认知资源"归入 Resource；"Loop"归入决策核心的控制策
 ### D3 · 独立仓库
 
 FysunOS 位于独立仓库（本机 `D:\fysun-os`，稍后同步到新的 GitHub 仓库），从 `agent-kernel`
-按 [迁移清单](../design/06-migration-inventory.md) 选择性迁移。不在 `agent-kernel` 内新增
+按 [迁移清单](../design/09-migration-inventory.md) 选择性迁移。不在 `agent-kernel` 内新增
 子项目，不原地改名。
 
 ### D4 · 权威 daemon 用 Rust
 
-`fysund` 用 Rust 实现，迁移 CognitiveOS 现有 kernel / store 中经验证的机制（Intent/Effect、
-replay、recovery、context、Verifier、Provider 代理）。否决 TypeScript 方案：权威层与 Runtime
+`fysund` 用 Rust 实现，迁移 CognitiveOS 现有 kernel / store 中经验证的机制（ActionIntent/Effect
+——CognitiveOS 中原名 Intent/Effect，ADR-0006——、replay、recovery、context、Verifier、Provider 代理）。否决 TypeScript 方案：权威层与 Runtime
 同技术栈的便利不足以抵消 TCB 扩大与边缘可移植性的损失。
 
 ### D5 · 治理账本采用有边界的 event-sourced 模型
@@ -80,12 +84,21 @@ Runtime 会话账本，不进入 FysunOS 对象模型。协作不设专门子系
 
 ## 后果
 
-- 需要维护一个与 DSH 版本一一对应的 `fysun` bundle 及适配测试；DSH 破坏性变更是持续成本。
+- 需要维护 `fysun-dsh` 对一个**钉住 revision** 的 DSH 的适配与适配测试，并以 CI 每日对上游最新 tag 跑 conformance 作非阻塞漂移预警
+  （[08 §6](../design/08-dsh-adapter.md)）；DSH 破坏性变更是持续成本，但不在关键路径上（M2a 以 DSH headless 作 MCP-only 基线，不依赖适配器）。
 - 双账本带来跨账本 replay 测试的硬成本，换来 OS 真源不依附任何 harness。
 - Personal 1.x 自研 Runtime 片段（Pi adapter、conversation projection 等）进入废弃路径；
   Personal 作为第一个应用切回 FysunOS。
-- 边缘场景需要另一个实现同一 Harness ABI 的 Runtime，这是 OS ≠ DSH 的直接后果与理由。
+- 边缘场景需要另一个实现 Runtime ABI 最小面的 Runtime，这是 OS ≠ DSH 的直接后果与理由。
 
 ## 待后续 ADR 的问题
 
-见 [08 MVP 计划 §7](../design/08-mvp-plan.md#7-开放问题待后续-adr)。
+见 [12 MVP 计划 §7](../design/12-mvp-plan.md)。
+
+## 修订历史
+
+- v0.7.0（2026-09-08）：§D2 由"DSH 为默认参考 Runtime；Cordis 为 TS 侧组合后端"重写为"DSH 为声明全部六个控制点的参考适配器 `fysun-dsh`；
+  Cordis 语义仅在适配器内部"，保留"不 fork / 不 vendor / 不进程内链接"与"不自建 loop 等"清单；§D3 迁移清单链接改指新 09；§D4 括注
+  `Intent/Effect` → `ActionIntent/Effect`；后果段"与 DSH 版本逐版对应的 `fysun` bundle" → "`fysun-dsh` 对一个钉住 revision 的适配与 CI 漂移预警"，
+  "Harness ABI" → "Runtime ABI 最小面"；待后续段链接改指新 12。为什么：ADR-0002 §D1/§D5/§D6 已 supersede §D2 但正文未动，导致三处过时表述
+  （蓝图 §0 C1-7）；v0.7.0 起 ADR 正文允许直接修订（蓝图 §I.1 决策 2）。对应蓝图决策：§I.1 决策 1、2；§C.1 ADR-0001 行。
